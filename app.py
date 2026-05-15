@@ -218,7 +218,14 @@ if search_btn:
         st.warning("종목을 입력해주세요.")
     else:
         with st.spinner(f"'{query}' 데이터를 월스트리트 터미널에서 긁어오는 중..."):
-            data = fetch_stock_data(query)
+            import importlib
+            import data_fetcher
+            importlib.reload(data_fetcher)
+            data = data_fetcher.fetch_stock_data(query)
+            if "error" in data:
+                st.error(data["error"])
+                import sys
+                st.write(f"System encoding: {sys.getdefaultencoding()}")
             if "error" in data:
                 st.error(data["error"])
                 st.session_state.stock_data = None
