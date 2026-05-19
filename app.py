@@ -3,6 +3,71 @@ import plotly.graph_objects as go
 from data_fetcher import fetch_stock_data
 import pandas as pd
 import google.generativeai as genai
+import json
+import os
+from datetime import datetime
+
+from supabase import create_client, Client
+
+REPORTS_FILE = "saved_reports.json"
+
+# Initialize Supabase client if secrets are present
+supabase: Client = None
+try:
+    if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        supabase = create_client(url, key)
+except Exception:
+    pass
+
+def load_saved_reports():
+    if supabase:
+        try:
+            response = supabase.table("saved_reports").select("*").order('timestamp', desc=True).execute()
+            reports = {}
+            for row in response.data:
+                key = f"{row['name']} ({row['ticker']}) - {row['timestamp']}"
+                reports[key] = row
+            return reports
+        except Exception as e:
+            st.error(f"Supabase 연결 오류: {e}")
+            return {}
+    else:
+        if os.path.exists(REPORTS_FILE):
+            try:
+                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
+            except:
+                return {}
+        return {}
+
+def save_report_to_file(ticker, name, report_text):
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    key = f"{name} ({ticker}) - {timestamp}"
+    
+    if supabase:
+        try:
+            supabase.table("saved_reports").insert({
+                "ticker": ticker,
+                "name": name,
+                "timestamp": timestamp,
+                "report_text": report_text
+            }).execute()
+        except Exception as e:
+            st.error(f"Supabase 저장 오류: {e}")
+    else:
+        reports = load_saved_reports()
+        reports[key] = {
+            "ticker": ticker,
+            "name": name,
+            "timestamp": timestamp,
+            "report_text": report_text
+        }
+        with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=4)
+            
+    return key
 
 st.set_page_config(page_title="Legendary Wall Street Broker AI", page_icon="📈", layout="wide")
 
@@ -312,6 +377,21 @@ with st.sidebar:
     st.write("📌 **검색 예시**")
     st.write("- 한국주식: 삼성전자, 005930, 카카오")
     st.write("- 미국주식: AAPL, 테슬라, 엔비디아")
+    
+    st.divider()
+    st.header("📂 내 보관함")
+    saved_reports = load_saved_reports()
+    if saved_reports:
+        report_keys = sorted(list(saved_reports.keys()), reverse=True)
+        selected_report = st.selectbox("저장된 리포트 불러오기", options=["선택 안함"] + report_keys)
+        if selected_report != "선택 안함":
+            if st.button("해당 리포트 보기", use_container_width=True):
+                st.session_state.viewing_saved_report = saved_reports[selected_report]
+                st.session_state.stock_data = None
+                st.session_state.ai_report = None
+                st.rerun()
+    else:
+        st.info("아직 저장된 리포트가 없습니다.")
 
 # Main Content
 st.title("📈 무패(無敗)의 트레이더 AI 주식 분석")
@@ -330,6 +410,22 @@ with st.expander("💼 이미 보유 중인 종목인가요? (선택사항)"):
 if "stock_data" not in st.session_state:
     st.session_state.stock_data = None
     st.session_state.ai_report = None
+if "viewing_saved_report" not in st.session_state:
+    st.session_state.viewing_saved_report = None
+
+if st.session_state.viewing_saved_report:
+    report_data = st.session_state.viewing_saved_report
+    st.title("📂 보관함: 저장된 AI 분석 리포트")
+    st.subheader(f"🏢 {report_data['name']} ({report_data['ticker']})")
+    st.caption(f"저장 일시: {report_data['timestamp']}")
+    
+    st.markdown(f"<div class='ai-box'>{report_data['report_text']}</div>", unsafe_allow_html=True)
+    
+    st.markdown("<br>", unsafe_allow_html=True)
+    if st.button("닫기 (새로운 검색 하기)", type="primary"):
+        st.session_state.viewing_saved_report = None
+        st.rerun()
+    st.stop()
 
 col1, col2 = st.columns([1, 5])
 with col1:
@@ -418,3 +514,8 @@ if st.session_state.stock_data:
         st.markdown("<br>", unsafe_allow_html=True)
         st.subheader("💡 브로커의 심층 분석 리포트")
         st.markdown(f"<div class='ai-box'>{st.session_state.ai_report}</div>", unsafe_allow_html=True)
+        
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("💾 이 분석 리포트 보관함에 저장하기"):
+            save_report_to_file(data['ticker'], data['name'], st.session_state.ai_report)
+            st.success("보관함에 성공적으로 저장되었습니다! 좌측 사이드바에서 언제든 다시 볼 수 있습니다.")

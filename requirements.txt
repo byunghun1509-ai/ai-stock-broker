@@ -1,11 +1,10 @@
 streamlit
+plotly
+pandas
+google-generativeai
 yfinance
 finance-datareader
-plotly
-google-generativeai
-beautifulsoup4
 requests
-pandas
-numpy
-lxml
-html5lib
+beautifulsoup4
+tabulate
+supabase
