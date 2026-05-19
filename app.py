@@ -5,7 +5,62 @@ import pandas as pd
 import google.generativeai as genai
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
+
+def get_actual_prices(ticker, saved_timestamp_str):
+    try:
+        saved_date = datetime.strptime(saved_timestamp_str, "%Y-%m-%d %H:%M:%S")
+    except:
+        return {}
+        
+    start_date = saved_date.strftime('%Y-%m-%d')
+    try:
+        if ticker.isdigit():
+            import FinanceDataReader as fdr
+            hist = fdr.DataReader(ticker, start_date)
+        else:
+            import yfinance as yf
+            hist = yf.download(ticker, start=start_date, progress=False)
+    except:
+        return {}
+        
+    if hist is None or hist.empty:
+        return {}
+        
+    def find_price(target_date):
+        future_data = hist[hist.index >= pd.Timestamp(target_date)]
+        if not future_data.empty:
+            close_series = future_data['Close']
+            if isinstance(close_series, pd.DataFrame):
+                return float(close_series.iloc[0, 0])
+            else:
+                return float(close_series.iloc[0])
+        return None
+        
+    results = {}
+    targets = {
+        "day1": saved_date + timedelta(days=1),
+        "week1": saved_date + timedelta(days=7),
+        "month1": saved_date + timedelta(days=30),
+        "month6": saved_date + timedelta(days=180),
+        "year1": saved_date + timedelta(days=365)
+    }
+    
+    now = datetime.now()
+    for key, target_date in targets.items():
+        if now < target_date:
+            results[key] = "아직 도달 안 함"
+        else:
+            price = find_price(target_date)
+            if price is not None:
+                if price > 10000:
+                    results[key] = f"{int(price):,}"
+                else:
+                    results[key] = f"{price:,.2f}"
+            else:
+                results[key] = "데이터 없음"
+                
+    return results
 
 from supabase import create_client, Client
 
@@ -42,9 +97,11 @@ def load_saved_reports():
                 return {}
         return {}
 
-def save_report_to_file(ticker, name, report_text):
+def save_report_to_file(ticker, name, raw_data):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     key = f"{name} ({ticker}) - {timestamp}"
+    
+    report_text = json.dumps(raw_data, ensure_ascii=False) if raw_data else "{}"
     
     if supabase:
         try:
@@ -342,13 +399,13 @@ JSON 스키마:
 ---
 *본 예측은 AI의 철저한 데이터 기반 시나리오이나, 실제 투자 책임은 본인에게 있습니다.*
 """
-            return markdown
+            return markdown, data
         except Exception as e:
             # Fallback to pure text with error message to understand why it failed
-            return f"⚠️ JSON 파싱 오류 발생. AI가 지정된 양식을 무시했습니다.\n\n오류 내용: {str(e)}\n\n[AI 원본 응답]\n{response.text}"
+            return f"⚠️ JSON 파싱 오류 발생. AI가 지정된 양식을 무시했습니다.\n\n오류 내용: {str(e)}\n\n[AI 원본 응답]\n{response.text}", None
         
     except Exception as e:
-        return f"❌ AI 분석 중 오류가 발생했습니다: {str(e)}"
+        return f"❌ AI 분석 중 오류가 발생했습니다: {str(e)}", None
 
 # Sidebar
 with st.sidebar:
@@ -410,16 +467,56 @@ with st.expander("💼 이미 보유 중인 종목인가요? (선택사항)"):
 if "stock_data" not in st.session_state:
     st.session_state.stock_data = None
     st.session_state.ai_report = None
+    st.session_state.ai_raw_data = None
 if "viewing_saved_report" not in st.session_state:
     st.session_state.viewing_saved_report = None
 
 if st.session_state.viewing_saved_report:
     report_data = st.session_state.viewing_saved_report
-    st.title("📂 보관함: 저장된 AI 분석 리포트")
+    st.title("📂 보관함: AI 예측 및 실제 주가 검증")
     st.subheader(f"🏢 {report_data['name']} ({report_data['ticker']})")
-    st.caption(f"저장 일시: {report_data['timestamp']}")
+    st.caption(f"예측 당시 일시: {report_data['timestamp']}")
     
-    st.markdown(f"<div class='ai-box'>{report_data['report_text']}</div>", unsafe_allow_html=True)
+    try:
+        raw_data = json.loads(report_data['report_text'])
+    except:
+        raw_data = None
+        
+    if raw_data and isinstance(raw_data, dict):
+        with st.spinner("과거 데이터와 실제 주가를 비교하는 중..."):
+            actual_prices = get_actual_prices(report_data['ticker'], report_data['timestamp'])
+            
+        s11 = raw_data.get('step11', {})
+        if not isinstance(s11, dict): s11 = {}
+        
+        st.markdown("### 🎯 예측 vs 실제 주가 검증 (성적표)")
+        
+        comp_data = {
+            "기간": ["1일 뒤", "1주일 뒤", "1개월 뒤", "6개월 뒤", "1년 뒤"],
+            "AI 예측 트렌드": [s11.get('day1_trend', '-'), s11.get('week1_trend', '-'), s11.get('month1_trend', '-'), s11.get('month6_trend', '-'), s11.get('year1_trend', '-')],
+            "AI 예상 주가": [s11.get('day1_price', '-'), s11.get('week1_price', '-'), s11.get('month1_price', '-'), s11.get('month6_price', '-'), s11.get('year1_price', '-')],
+            "실제 종가": [actual_prices.get('day1', '-'), actual_prices.get('week1', '-'), actual_prices.get('month1', '-'), actual_prices.get('month6', '-'), actual_prices.get('year1', '-')],
+            "예측 근거": [s11.get('day1_reason', '-'), s11.get('week1_reason', '-'), s11.get('month1_reason', '-'), s11.get('month6_reason', '-'), s11.get('year1_reason', '-')]
+        }
+        
+        st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
+        
+        st.markdown("---")
+        st.markdown("### ⚖️ 최종 투자 의견 (당시 기준)")
+        st.info(f"**결론**: {raw_data.get('opinion', '-')}\n\n**핵심 이유**: {raw_data.get('opinion_reason', '-')}")
+        
+        cols = st.columns(4)
+        cols[0].metric("매수 타점", raw_data.get('entry_price', '-'))
+        cols[1].metric("단기 목표가", raw_data.get('target_short', '-'))
+        cols[2].metric("중장기 목표가", raw_data.get('target_long', '-'))
+        cols[3].metric("손절가", raw_data.get('stop_loss', '-'))
+        
+        st.markdown("---")
+        st.markdown("### 📊 당시 분석 요약")
+        st.write(raw_data.get('summary', '-'))
+    else:
+        st.warning("이 리포트는 예전 텍스트 형식으로 저장되어 있어 요약 및 비교 기능을 지원하지 않습니다.")
+        st.markdown(f"<div class='ai-box'>{report_data['report_text']}</div>", unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("닫기 (새로운 검색 하기)", type="primary"):
@@ -454,8 +551,9 @@ if search_btn:
                 
                 if api_key:
                     with st.spinner("🧠 전문 브로커 AI가 모든 지표를 종합하여 10번의 반복 검증 사고를 진행 중입니다... (약 10~20초 소요)"):
-                        report = get_ai_analysis(api_key, data, is_held, purchase_price)
+                        report, raw_data = get_ai_analysis(api_key, data, is_held, purchase_price)
                         st.session_state.ai_report = report
+                        st.session_state.ai_raw_data = raw_data
                 else:
                     st.session_state.ai_report = "⚠️ AI 분석을 위해 좌측 사이드바에 Gemini API 키를 입력해주세요."
 
@@ -516,6 +614,9 @@ if st.session_state.stock_data:
         st.markdown(f"<div class='ai-box'>{st.session_state.ai_report}</div>", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 이 분석 리포트 보관함에 저장하기"):
-            save_report_to_file(data['ticker'], data['name'], st.session_state.ai_report)
-            st.success("보관함에 성공적으로 저장되었습니다! 좌측 사이드바에서 언제든 다시 볼 수 있습니다.")
+        if st.button("💾 요약본 및 성적표 분석용으로 보관함에 저장하기"):
+            if st.session_state.get('ai_raw_data'):
+                save_report_to_file(data['ticker'], data['name'], st.session_state.ai_raw_data)
+                st.success("보관함에 성공적으로 저장되었습니다! 좌측 사이드바에서 언제든 다시 볼 수 있습니다.")
+            else:
+                st.error("저장할 데이터가 없습니다 (JSON 파싱 실패).")
