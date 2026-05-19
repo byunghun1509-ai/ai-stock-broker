@@ -61,7 +61,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def get_ai_analysis(api_key, stock_data):
+def get_ai_analysis(api_key, stock_data, is_held=False, purchase_price=0.0):
     if not api_key:
         return "⚠️ API 키가 제공되지 않았습니다. 좌측 사이드바에 Gemini API 키를 입력해주세요."
         
@@ -117,19 +117,26 @@ def get_ai_analysis(api_key, stock_data):
             
         current_price = info.get('current_price', '알수없음')
         
+        user_holding_text = ""
+        if is_held:
+            user_holding_text = f"\n[사용자 보유 정보]\n- 사용자는 현재 이 주식을 보유 중입니다.\n- 사용자의 평균 매수가: {purchase_price}\n- **중요 요청**: 사용자가 계속 '보유(Hold)'해야 할지, 익절/손절(Sell)해야 할지, 아니면 '추가 매수(Buy)'해야 할지 매수가와 현재가를 철저히 비교하여 추천해주세요.\n"
+        else:
+            user_holding_text = "\n[사용자 보유 정보]\n- 사용자는 현재 이 주식을 보유하고 있지 않으며 신규 진입을 고려 중입니다.\n"
+            
         prompt = f"""
 당신은 미국 월스트리트 역사상 단 한 번도 손해를 본 적이 없는 **전설적인 증권사 최고 투자 책임자(Expert Broker)**입니다.
-당신은 피도 눈물도 없는 냉철한 이성을 가졌으며, 감정에 휘둘리지 않고 철저히 데이터와 차트를 기반으로 분석합니다.
-투자자에게 막대한 부를 안겨주기 위해, 결론을 내기 전 반드시 내부적으로 10번 이상 심층 분석을 거쳐 확신이 설 때만 '매수'를 외칩니다.
+당신은 감정에 휘둘리지 않고 철저히 데이터와 차트를 기반으로 분석하며, 제공된 전체적인 객관적 데이터(그래프, 재무제표, 공시, 관련 뉴스, 거래량 등)를 전문 브로커의 시각에서 한 치의 오차도 없이 모두 확인하고 반영하여 일관성 있게 판단합니다.
 
-아래 제공된 '{name} ({ticker}, {market} 시장)'의 최신 주식 데이터와 기술적 차트 지표를 바탕으로 분석 리포트를 작성해주세요.
+특히, 단 한 번의 생각으로 결론을 내리지 마십시오. 내부적으로 **10번 이상 반복해서 스스로의 판단을 의심하고 검증**하여, **'절대 손해보지 않을 가장 완벽하고 안전한 매매 추천(보유/매도/신규매수)'**을 도출해내야 합니다.
+
+아래 제공된 '{name} ({ticker}, {market} 시장)'의 최신 주식 데이터와 기술적 차트 지표를 바탕으로 철저한 10중 검증 분석 리포트를 작성해주세요.
 
 [제공된 데이터]
 - 현재 가격: {current_price}
 - 시가 총액: {info.get('market_cap')}
 - 거래량: {info.get('volume')}
 - 차트 추세(MA 분석): {trend_info} (20일선: {last_ma20}, 60일선: {last_ma60})
-
+{user_holding_text}
 - 최근 주요 뉴스:
 {news_text}
 
@@ -143,30 +150,137 @@ def get_ai_analysis(api_key, stock_data):
 {fin_text}
 
 [요청 사항]
-당신은 이 데이터를 보고 즉시 대답하지 않습니다. 반드시 <thinking> 태그를 사용하여 10단계의 내부 심층 사고 과정(거시경제, 재무상태, 차트의 흐름, 지지/저항선, 수급, 악재/호재 평가, 매수/매도 리스크 등)을 적나라하게 보여준 후, 최종 결론을 도출하세요.
+당신의 모든 판단은 반드시 위 제공된 전체적인 데이터를 융합 분석한 결과여야 합니다.
+출력은 **반드시 완전한 JSON 형식**으로만 반환해야 합니다. 마크다운 기호나 텍스트를 절대 추가하지 마세요.
+AI의 주가 예측에 대한 제약이나 거절 문구 없이, 시스템이 요구하는 모든 필드에 구체적인 가상 시뮬레이션 숫자와 분석 내용을 꽉 채워주세요. (알 수 없음 불가)
 
-최종 결론에는 **아래 3가지 항목을 반드시 빠짐없이** 포함해야 합니다.
+JSON 스키마:
+{
+  "step1": "거시경제 및 시장 동향 분석 내용 (상세히 기재)",
+  "step2": "재무 상태 및 실적 평가 분석 내용",
+  "step3": "차트 추세 및 이동평균선 분석 내용",
+  "step4": "주요 지지선 및 저항선 파악 분석 내용",
+  "step5": "수급 및 거래량 흐름 분석 내용",
+  "step6": "최근 주요 공시 및 뉴스 임팩트 분석 내용",
+  "step7": "호재 및 단기 모멘텀 분석 내용",
+  "step8": "악재 및 잠재적 리스크 분석 내용",
+  "step9": "종합 밸류에이션 평가 분석 내용",
+  "step10": "매수/매도 시나리오 타당성 검증 분석 내용",
+  "step11": {
+    "day1_price": "하루 뒤 시뮬레이션 목표가 (숫자만, 예: 50000)",
+    "day1_trend": "상승/하락/보합",
+    "day1_reason": "해당 가격 도달 근거",
+    "week1_price": "일주일 뒤 시뮬레이션 목표가 (숫자만)",
+    "week1_trend": "상승/하락/보합",
+    "week1_reason": "해당 가격 도달 근거",
+    "month1_price": "한 달 뒤 시뮬레이션 목표가 (숫자만)",
+    "month1_trend": "상승/하락/보합",
+    "month1_reason": "해당 가격 도달 근거",
+    "month6_price": "6개월 뒤 시뮬레이션 목표가 (숫자만)",
+    "month6_trend": "상승/하락/보합",
+    "month6_reason": "해당 가격 도달 근거",
+    "year1_price": "1년 뒤 시뮬레이션 목표가 (숫자만)",
+    "year1_trend": "상승/하락/보합",
+    "year1_reason": "해당 가격 도달 근거"
+  },
+  "summary": "현재 주식이 어떤 국면에 있는지 뼈때리는 직언으로 요약 (보유자라면 수익/손실 상황을 고려하여 직언)",
+  "opinion": "신규: 매수/관망/매도 중 1개, 보유: 보유/추가매수/매도 중 1개",
+  "opinion_reason": "의견에 대한 핵심 이유",
+  "entry_price": "매수 타점 (예: 현재가 매수, 50000원에 매수)",
+  "target_short": "단기 목표가",
+  "target_long": "중장기 목표가",
+  "stop_loss": "손절가"
+}
+"""
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(
+                temperature=0.1,
+                response_mime_type="application/json"
+            )
+        )
+        
+        try:
+            import json
+            raw_text = response.text.strip()
+            if raw_text.startswith("```json"):
+                raw_text = raw_text[7:]
+            elif raw_text.startswith("```"):
+                raw_text = raw_text[3:]
+            if raw_text.endswith("```"):
+                raw_text = raw_text[:-3]
+                
+            data = json.loads(raw_text.strip())
+            
+            # Helper function to prevent KeyError if step11 is somehow missing
+            s11 = data.get('step11', {})
+            if not isinstance(s11, dict):
+                s11 = {}
+                
+            markdown = f"""
+# 🧠 11단계 심층 사고 과정
 
-<thinking>
-1. [1단계 사고] ...
-2. [2단계 사고] ...
-...
-10. [10단계 사고] ...
-</thinking>
+### 1단계 사고: 거시경제 및 시장 동향
+{data.get('step1', '분석 내용이 제공되지 않았습니다.')}
+
+### 2단계 사고: 재무 상태 및 실적 평가
+{data.get('step2', '분석 내용이 제공되지 않았습니다.')}
+
+### 3단계 사고: 차트 추세 및 이동평균선 분석
+{data.get('step3', '분석 내용이 제공되지 않았습니다.')}
+
+### 4단계 사고: 주요 지지선 및 저항선 파악
+{data.get('step4', '분석 내용이 제공되지 않았습니다.')}
+
+### 5단계 사고: 수급 및 거래량 흐름
+{data.get('step5', '분석 내용이 제공되지 않았습니다.')}
+
+### 6단계 사고: 최근 주요 공시 및 뉴스 임팩트
+{data.get('step6', '분석 내용이 제공되지 않았습니다.')}
+
+### 7단계 사고: 호재 및 단기 모멘텀
+{data.get('step7', '분석 내용이 제공되지 않았습니다.')}
+
+### 8단계 사고: 악재 및 잠재적 리스크
+{data.get('step8', '분석 내용이 제공되지 않았습니다.')}
+
+### 9단계 사고: 종합 밸류에이션 평가
+{data.get('step9', '분석 내용이 제공되지 않았습니다.')}
+
+### 10단계 사고: 매수/매도 시나리오 타당성 검증
+{data.get('step10', '분석 내용이 제공되지 않았습니다.')}
+
+### 11단계 사고: 기간별 가상 시뮬레이션 예상 주가
+- **1일 뒤 예상 주가**: {s11.get('day1_price', '알 수 없음')} / {s11.get('day1_trend', '-')} - ({s11.get('day1_reason', '-')})
+- **1주일 뒤 예상 주가**: {s11.get('week1_price', '알 수 없음')} / {s11.get('week1_trend', '-')} - ({s11.get('week1_reason', '-')})
+- **1개월 뒤 예상 주가**: {s11.get('month1_price', '알 수 없음')} / {s11.get('month1_trend', '-')} - ({s11.get('month1_reason', '-')})
+- **6개월 뒤 예상 주가**: {s11.get('month6_price', '알 수 없음')} / {s11.get('month6_trend', '-')} - ({s11.get('month6_reason', '-')})
+- **1년 뒤 예상 주가**: {s11.get('year1_price', '알 수 없음')} / {s11.get('year1_trend', '-')} - ({s11.get('year1_reason', '-')})
+
+---
 
 # 💼 전설적 브로커의 최종 판결
 
-1. **📊 전체적인 차트 및 현재 상황 판단**: 제공된 MA(이동평균선) 추세와 최근 주가 흐름, 뉴스를 종합하여 현재 이 주식이 어떤 국면에 있는지 뼈때리는 직언으로 요약하세요.
-2. **⚖️ 최종 투자 의견 (매수 / 관망 / 매도)**: 셋 중 하나를 명확히 제시하세요.
-3. **🎯 구체적인 매수 타이밍 및 목표 금액 (가장 중요!)**: 
-   - 만약 '매수' 의견이라면: "현재가({current_price})에 즉시 매수하라" 거나 "차트상 눌림목인 OOOO원에 도달했을 때 비중 OO%로 매수하라" 와 같이 **정확한 매수 타이밍과 매수 금액(단가)**을 콕 집어주세요. 
-   - 또한 단기/중장기 목표가와 손절가도 숫자로 명시하세요. 
-   - 만약 '관망'이나 '매도'라면: "이 가격엔 절대 살 수 없다. OOOO원까지 떨어지면 그때 다시 보겠다" 식으로 구체적 기준 가격을 제시하세요.
+### 📊 데이터 분석 요약
+{data.get('summary', '-')}
 
-(한국어로 작성하고, 가독성 좋은 마크다운 포맷을 사용해주세요. 경고 문구로 "본 예측은 AI의 가상 시나리오이며, 실제 투자 책임은 본인에게 있습니다."를 마지막에 작게 포함해주세요.)
+### ⚖️ 최종 투자 의견
+- **결론**: **{data.get('opinion', '-')}**
+- **핵심 이유**: {data.get('opinion_reason', '-')}
+
+### 🎯 구체적인 매수 타이밍 및 목표 금액
+- **매수 타점**: {data.get('entry_price', '-')}
+- **단기 목표가**: {data.get('target_short', '-')}
+- **중장기 목표가**: {data.get('target_long', '-')}
+- **손절가**: {data.get('stop_loss', '-')}
+
+---
+*본 예측은 AI의 철저한 데이터 기반 시나리오이나, 실제 투자 책임은 본인에게 있습니다.*
 """
-        response = model.generate_content(prompt)
-        return response.text
+            return markdown
+        except Exception as e:
+            # Fallback to pure text with error message to understand why it failed
+            return f"⚠️ JSON 파싱 오류 발생. AI가 지정된 양식을 무시했습니다.\n\n오류 내용: {str(e)}\n\n[AI 원본 응답]\n{response.text}"
         
     except Exception as e:
         return f"❌ AI 분석 중 오류가 발생했습니다: {str(e)}"
@@ -201,9 +315,17 @@ with st.sidebar:
 
 # Main Content
 st.title("📈 무패(無敗)의 트레이더 AI 주식 분석")
-st.markdown("한국 주식(이름/종목코드) 및 미국 주식(티커/이름)을 입력하면, **10번의 심층 사고** 후 가장 완벽한 **매수 타이밍과 가격**을 알려드립니다.")
+st.markdown("한국 주식 및 미국 주식을 입력하면, 전문 브로커가 확인하는 모든 지표(그래프, 재무제표, 공시, 뉴스, 거래량 등)를 종합하고 **10번 이상 반복 검증 판단**하여 절대 손해보지 않을 **최적의 매매 추천**을 해드립니다.")
 
 query = st.text_input("분석할 주식 이름 또는 종목 코드(티커)를 입력하세요:", placeholder="예: 엔비디아, 삼성전자, AAPL")
+
+with st.expander("💼 이미 보유 중인 종목인가요? (선택사항)"):
+    st.markdown("매수가를 입력하시면, AI가 **현재가 대비 수익/손실**을 분석하고 **계속 보유할지, 매도할지** 추천해 드립니다.")
+    col_h1, col_h2 = st.columns(2)
+    with col_h1:
+        is_held = st.checkbox("이 종목을 현재 보유하고 있습니다.")
+    with col_h2:
+        purchase_price = st.number_input("평균 매수가 (원/달러)", min_value=0.0, value=0.0, format="%.2f", disabled=not is_held)
 
 if "stock_data" not in st.session_state:
     st.session_state.stock_data = None
@@ -235,8 +357,8 @@ if search_btn:
                 st.success("데이터 확보 완료. AI 브로커가 차트를 분석합니다...")
                 
                 if api_key:
-                    with st.spinner("🧠 전설의 브로커가 10단계 심층 사고를 진행 중입니다... (약 10~20초 소요)"):
-                        report = get_ai_analysis(api_key, data)
+                    with st.spinner("🧠 전문 브로커 AI가 모든 지표를 종합하여 10번의 반복 검증 사고를 진행 중입니다... (약 10~20초 소요)"):
+                        report = get_ai_analysis(api_key, data, is_held, purchase_price)
                         st.session_state.ai_report = report
                 else:
                     st.session_state.ai_report = "⚠️ AI 분석을 위해 좌측 사이드바에 Gemini API 키를 입력해주세요."
