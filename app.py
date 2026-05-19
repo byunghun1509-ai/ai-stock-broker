@@ -126,6 +126,64 @@ def save_report_to_file(ticker, name, raw_data):
             
     return key
 
+def delete_report(key, report_data):
+    if supabase:
+        try:
+            if 'id' in report_data:
+                supabase.table("saved_reports").delete().eq("id", report_data['id']).execute()
+            else:
+                supabase.table("saved_reports").delete().eq("timestamp", report_data['timestamp']).eq("ticker", report_data['ticker']).execute()
+        except Exception as e:
+            st.error(f"삭제 오류: {e}")
+    else:
+        if os.path.exists(REPORTS_FILE):
+            try:
+                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                    reports = json.load(f)
+                if key in reports:
+                    del reports[key]
+                with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(reports, f, ensure_ascii=False, indent=4)
+            except:
+                pass
+
+def save_report_callback(ticker, name, raw_data):
+    if raw_data:
+        optimized_data = {
+            "step11": raw_data.get("step11", {}),
+            "summary": raw_data.get("summary", ""),
+            "opinion": raw_data.get("opinion", ""),
+            "opinion_reason": raw_data.get("opinion_reason", ""),
+            "entry_price": raw_data.get("entry_price", ""),
+            "target_short": raw_data.get("target_short", ""),
+            "target_long": raw_data.get("target_long", ""),
+            "stop_loss": raw_data.get("stop_loss", "")
+        }
+        save_report_to_file(ticker, name, optimized_data)
+        st.session_state.just_saved = True
+
+API_KEY_FILE = ".gemini_api_key"
+
+def get_saved_api_key():
+    if "GEMINI_API_KEY" in st.secrets:
+        return st.secrets["GEMINI_API_KEY"]
+    if os.path.exists(API_KEY_FILE):
+        try:
+            with open(API_KEY_FILE, "r") as f:
+                return f.read().strip()
+        except:
+            return ""
+    return ""
+
+def save_api_key(key_str):
+    if key_str and not ("GEMINI_API_KEY" in st.secrets and key_str == st.secrets["GEMINI_API_KEY"]):
+        try:
+            with open(API_KEY_FILE, "w") as f:
+                f.write(key_str)
+        except:
+            pass
+
+
 st.set_page_config(page_title="Legendary Wall Street Broker AI", page_icon="📈", layout="wide")
 
 # Custom CSS for Premium Dark Theme
@@ -416,7 +474,10 @@ with st.sidebar:
     st.divider()
     
     st.header("🔑 설정")
-    api_key = st.text_input("Gemini API Key를 입력하세요", type="password")
+    saved_key = get_saved_api_key()
+    api_key = st.text_input("Gemini API Key를 입력하세요", value=saved_key, type="password")
+    if api_key and api_key != saved_key:
+        save_api_key(api_key)
     
     st.markdown("""
     **API 키 발급 방법:**
@@ -470,6 +531,18 @@ if "stock_data" not in st.session_state:
     st.session_state.ai_raw_data = None
 if "viewing_saved_report" not in st.session_state:
     st.session_state.viewing_saved_report = None
+if "just_saved" not in st.session_state:
+    st.session_state.just_saved = False
+if "just_deleted" not in st.session_state:
+    st.session_state.just_deleted = False
+
+if st.session_state.just_saved:
+    st.success("보관함에 성공적으로 저장되었습니다! 좌측 사이드바에서 언제든 다시 볼 수 있습니다.")
+    st.session_state.just_saved = False
+
+if st.session_state.just_deleted:
+    st.success("리포트가 성공적으로 삭제되었습니다.")
+    st.session_state.just_deleted = False
 
 if st.session_state.viewing_saved_report:
     report_data = st.session_state.viewing_saved_report
@@ -519,9 +592,20 @@ if st.session_state.viewing_saved_report:
         st.markdown(f"<div class='ai-box'>{report_data['report_text']}</div>", unsafe_allow_html=True)
     
     st.markdown("<br>", unsafe_allow_html=True)
-    if st.button("닫기 (새로운 검색 하기)", type="primary"):
-        st.session_state.viewing_saved_report = None
-        st.rerun()
+    
+    col_btn1, col_btn2 = st.columns(2)
+    with col_btn1:
+        if st.button("닫기 (새로운 검색 하기)", type="primary", use_container_width=True):
+            st.session_state.viewing_saved_report = None
+            st.rerun()
+    with col_btn2:
+        report_key = f"{report_data['name']} ({report_data['ticker']}) - {report_data['timestamp']}"
+        if st.button("🗑️ 이 리포트 삭제하기", use_container_width=True):
+            delete_report(report_key, report_data)
+            st.session_state.viewing_saved_report = None
+            st.session_state.just_deleted = True
+            st.rerun()
+            
     st.stop()
 
 col1, col2 = st.columns([1, 5])
@@ -614,9 +698,5 @@ if st.session_state.stock_data:
         st.markdown(f"<div class='ai-box'>{st.session_state.ai_report}</div>", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 요약본 및 성적표 분석용으로 보관함에 저장하기"):
-            if st.session_state.get('ai_raw_data'):
-                save_report_to_file(data['ticker'], data['name'], st.session_state.ai_raw_data)
-                st.success("보관함에 성공적으로 저장되었습니다! 좌측 사이드바에서 언제든 다시 볼 수 있습니다.")
-            else:
-                st.error("저장할 데이터가 없습니다 (JSON 파싱 실패).")
+        if st.button("💾 요약본 및 성적표 분석용으로 보관함에 저장하기", on_click=save_report_callback, args=(data['ticker'], data['name'], st.session_state.get('ai_raw_data'))):
+            pass
