@@ -46,7 +46,7 @@ def get_actual_prices(ticker, saved_timestamp_str):
         "year1": saved_date + timedelta(days=365)
     }
     
-    now = datetime.now()
+    now = datetime.utcnow() + timedelta(hours=9)
     for key, target_date in targets.items():
         if now < target_date:
             results[key] = "아직 도달 안 함"
@@ -98,7 +98,7 @@ def load_saved_reports():
         return {}
 
 def save_report_to_file(ticker, name, raw_data):
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
     key = f"{name} ({ticker}) - {timestamp}"
     
     report_text = json.dumps(raw_data, ensure_ascii=False) if raw_data else "{}"
@@ -490,6 +490,7 @@ with st.sidebar:
     ### 🌐 클라우드 배포 모드 가동 중
     이 앱은 **Streamlit Community Cloud**를 통해 24시간 언제 어디서나 모바일로 접속할 수 있도록 설계되었습니다. PC를 꺼도 작동합니다!
     """)
+    st.caption("🔄 업데이트 버전: v1.1 (한국시간 KST 완벽 적용)")
     
     st.divider()
     st.write("📌 **검색 예시**")
