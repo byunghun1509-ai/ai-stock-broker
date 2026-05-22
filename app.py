@@ -147,7 +147,7 @@ def delete_report(key, report_data):
             except:
                 pass
 
-def save_report_callback(ticker, name, raw_data):
+def save_report_callback(ticker, name, raw_data, category="미분류", subcategory="없음"):
     if raw_data:
         optimized_data = {
             "step11": raw_data.get("step11", {}),
@@ -157,7 +157,9 @@ def save_report_callback(ticker, name, raw_data):
             "entry_price": raw_data.get("entry_price", ""),
             "target_short": raw_data.get("target_short", ""),
             "target_long": raw_data.get("target_long", ""),
-            "stop_loss": raw_data.get("stop_loss", "")
+            "stop_loss": raw_data.get("stop_loss", ""),
+            "category": category,
+            "subcategory": subcategory
         }
         save_report_to_file(ticker, name, optimized_data)
         st.session_state.just_saved = True
@@ -501,14 +503,54 @@ with st.sidebar:
     st.header("📂 내 보관함")
     saved_reports = load_saved_reports()
     if saved_reports:
-        report_keys = sorted(list(saved_reports.keys()), reverse=True)
-        selected_report = st.selectbox("저장된 리포트 불러오기", options=["선택 안함"] + report_keys)
-        if selected_report != "선택 안함":
-            if st.button("해당 리포트 보기", use_container_width=True):
-                st.session_state.viewing_saved_report = saved_reports[selected_report]
-                st.session_state.stock_data = None
-                st.session_state.ai_report = None
-                st.rerun()
+        sort_order = st.selectbox("정렬 기준", ["최신순", "과거순", "이름 오름차순", "이름 내림차순"])
+        
+        parsed_reports = []
+        for k, r in saved_reports.items():
+            cat = "미분류"
+            subcat = "없음"
+            try:
+                rt = json.loads(r.get('report_text', '{}'))
+                cat = rt.get('category', '미분류')
+                subcat = rt.get('subcategory', '없음')
+            except:
+                pass
+            parsed_reports.append({
+                "key": k,
+                "name": r.get('name', ''),
+                "ticker": r.get('ticker', ''),
+                "timestamp": r.get('timestamp', ''),
+                "category": cat,
+                "subcategory": subcat,
+                "original_data": r
+            })
+            
+        if sort_order == "최신순":
+            parsed_reports.sort(key=lambda x: x['timestamp'], reverse=True)
+        elif sort_order == "과거순":
+            parsed_reports.sort(key=lambda x: x['timestamp'])
+        elif sort_order == "이름 오름차순":
+            parsed_reports.sort(key=lambda x: x['name'])
+        elif sort_order == "이름 내림차순":
+            parsed_reports.sort(key=lambda x: x['name'], reverse=True)
+            
+        categories = {"보유주식": ["투자", "퇴직"], "관심주식": ["1", "2", "3"], "미분류": ["없음"]}
+        
+        for cat, subcats in categories.items():
+            cat_reports = [r for r in parsed_reports if r['category'] == cat]
+            if cat_reports:
+                with st.expander(f"📁 {cat} ({len(cat_reports)})"):
+                    for subcat in subcats:
+                        subcat_reports = [r for r in cat_reports if r['subcategory'] == subcat]
+                        if subcat_reports:
+                            if cat != "미분류":
+                                st.markdown(f"&nbsp;&nbsp;📂 **{subcat}**")
+                            for r in subcat_reports:
+                                if st.button(f"📄 {r['name']} ({r['ticker']}) - {r['timestamp'][:10]}", key=f"btn_{r['key']}", use_container_width=True):
+                                    st.session_state.viewing_saved_report = r['original_data']
+                                    st.session_state.stock_data = None
+                                    st.session_state.ai_report = None
+                                    st.rerun()
     else:
         st.info("아직 저장된 리포트가 없습니다.")
 
@@ -563,6 +605,21 @@ if st.session_state.viewing_saved_report:
         s11 = raw_data.get('step11', {})
         if not isinstance(s11, dict): s11 = {}
         
+        def calc_acc(pred_str, actual_str):
+            try:
+                import re
+                pred = float(re.sub(r'[^\d.]', '', str(pred_str)))
+                actual = float(re.sub(r'[^\d.]', '', str(actual_str)))
+                diff = (actual - pred) / pred * 100
+                if diff > 0:
+                    return f"🔴 상회 (+{diff:.2f}%)"
+                elif diff < 0:
+                    return f"🔵 하회 ({diff:.2f}%)"
+                else:
+                    return "일치 (0.00%)"
+            except:
+                return "-"
+
         st.markdown("### 🎯 예측 vs 실제 주가 검증 (성적표)")
         
         comp_data = {
@@ -570,6 +627,13 @@ if st.session_state.viewing_saved_report:
             "AI 예측 트렌드": [s11.get('day1_trend', '-'), s11.get('week1_trend', '-'), s11.get('month1_trend', '-'), s11.get('month6_trend', '-'), s11.get('year1_trend', '-')],
             "AI 예상 주가": [s11.get('day1_price', '-'), s11.get('week1_price', '-'), s11.get('month1_price', '-'), s11.get('month6_price', '-'), s11.get('year1_price', '-')],
             "실제 종가": [actual_prices.get('day1', '-'), actual_prices.get('week1', '-'), actual_prices.get('month1', '-'), actual_prices.get('month6', '-'), actual_prices.get('year1', '-')],
+            "예측 대비 실제 (오차율%)": [
+                calc_acc(s11.get('day1_price', '-'), actual_prices.get('day1', '-')),
+                calc_acc(s11.get('week1_price', '-'), actual_prices.get('week1', '-')),
+                calc_acc(s11.get('month1_price', '-'), actual_prices.get('month1', '-')),
+                calc_acc(s11.get('month6_price', '-'), actual_prices.get('month6', '-')),
+                calc_acc(s11.get('year1_price', '-'), actual_prices.get('year1', '-'))
+            ],
             "예측 근거": [s11.get('day1_reason', '-'), s11.get('week1_reason', '-'), s11.get('month1_reason', '-'), s11.get('month6_reason', '-'), s11.get('year1_reason', '-')]
         }
         
@@ -699,5 +763,17 @@ if st.session_state.stock_data:
         st.markdown(f"<div class='ai-box'>{st.session_state.ai_report}</div>", unsafe_allow_html=True)
         
         st.markdown("<br>", unsafe_allow_html=True)
-        if st.button("💾 요약본 및 성적표 분석용으로 보관함에 저장하기", on_click=save_report_callback, args=(data['ticker'], data['name'], st.session_state.get('ai_raw_data'))):
-            pass
+        st.markdown("### 💾 리포트 보관함에 저장")
+        cat_col1, cat_col2 = st.columns(2)
+        with cat_col1:
+            selected_category = st.selectbox("분류", ["보유주식", "관심주식", "미분류"])
+        with cat_col2:
+            if selected_category == "보유주식":
+                selected_subcategory = st.selectbox("하위 폴더", ["투자", "퇴직"])
+            elif selected_category == "관심주식":
+                selected_subcategory = st.selectbox("하위 폴더", ["1", "2", "3"])
+            else:
+                selected_subcategory = st.selectbox("하위 폴더", ["없음"])
+                
+        if st.button("💾 위 설정으로 리포트 저장하기", use_container_width=True):
+            save_report_callback(data['ticker'], data['name'], st.session_state.get('ai_raw_data'), selected_category, selected_subcategory)
