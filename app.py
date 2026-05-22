@@ -147,6 +147,119 @@ def delete_report(key, report_data):
             except:
                 pass
 
+def update_report_category(key, report_data, new_cat, new_subcat):
+    try:
+        raw_data = json.loads(report_data.get('report_text', '{}'))
+    except:
+        raw_data = {}
+    raw_data['category'] = new_cat
+    raw_data['subcategory'] = new_subcat
+    new_report_text = json.dumps(raw_data, ensure_ascii=False)
+    
+    if supabase:
+        try:
+            if 'id' in report_data:
+                supabase.table("saved_reports").update({"report_text": new_report_text}).eq("id", report_data['id']).execute()
+            else:
+                supabase.table("saved_reports").update({"report_text": new_report_text}).eq("timestamp", report_data['timestamp']).eq("ticker", report_data['ticker']).execute()
+        except Exception as e:
+            st.error(f"카테고리 업데이트 오류: {e}")
+    else:
+        if os.path.exists(REPORTS_FILE):
+            try:
+                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                    reports = json.load(f)
+                if key in reports:
+                    reports[key]['report_text'] = new_report_text
+                with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(reports, f, ensure_ascii=False, indent=4)
+            except:
+                pass
+
+def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
+    if not api_key:
+        return {"error": "⚠️ API 키가 제공되지 않았습니다."}
+    try:
+        genai.configure(api_key=api_key)
+        valid_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                valid_models.append(m.name)
+        if not valid_models:
+            return {"error": "❌ 사용 가능한 Gemini 모델이 없습니다."}
+        model_name = valid_models[0]
+        for pref in ['models/gemini-1.5-pro-latest', 'models/gemini-1.5-pro', 'models/gemini-1.5-flash-latest', 'models/gemini-1.5-flash']:
+            if pref in valid_models:
+                model_name = pref
+                break
+        model = genai.GenerativeModel(model_name)
+        
+        info = stock_data['info']
+        market = stock_data['market']
+        name = stock_data['name']
+        ticker = stock_data['ticker']
+        hist_df = stock_data['history']
+        
+        trend_info = getattr(hist_df, 'attrs', {}).get('trend', '알수없음')
+        last_ma20 = getattr(hist_df, 'attrs', {}).get('last_ma20', 'N/A')
+        last_ma60 = getattr(hist_df, 'attrs', {}).get('last_ma60', 'N/A')
+        if last_ma20 != 'N/A': last_ma20 = f"{last_ma20:,.2f}"
+        if last_ma60 != 'N/A': last_ma60 = f"{last_ma60:,.2f}"
+        
+        if not hist_df.empty:
+            recent_hist = hist_df.tail(20).to_markdown()
+        else:
+            recent_hist = "최근 주가 데이터가 없습니다."
+            
+        news_text = "\n".join([f"- {n}" for n in info.get('news', [])])
+        disc_text = "\n".join([f"- {d}" for n, d in enumerate(info.get('disclosures', []))])
+        fin_df = info.get('financials')
+        fin_text = fin_df.to_markdown() if fin_df is not None else "재무제표 정보가 없습니다."
+        current_price = info.get('current_price', '알수없음')
+
+        prompt = f"""
+당신은 최고의 월스트리트 주식 분석가입니다.
+이 종목 '{name} ({ticker}, {market} 시장)'에 대해 과거 당신은 다음과 같이 평가했었습니다:
+[과거 투자 의견]: {past_opinion}
+[과거 분석 요약]: {past_summary}
+
+이제 **현재 시점**의 최신 주식 데이터와 기술적 차트 지표, 뉴스, 재무제표를 바탕으로 다시 한번 철저하게(10번 이상 고민하고 검증하여) 분석해주십시오.
+
+[최신 데이터]
+- 현재 가격: {current_price}
+- 최근 차트 추세: {trend_info} (20일선: {last_ma20}, 60일선: {last_ma60})
+- 최근 뉴스: {news_text}
+- 최근 공시/발표: {disc_text}
+- 최근 20일 주가 추이: {recent_hist}
+- 재무제표: {fin_text}
+
+[요청 사항]
+과거 의견과 현재 데이터를 철저히 비교하여, **현재 시점의 최종 투자 의견**을 도출하고, **의견이 변경되었다면 그 이유**를 명확히 설명해주세요.
+답변은 아래 JSON 형식으로만 반환하세요:
+{{
+  "current_opinion": "매수/보유/매도 중 1개 (현재 의견)",
+  "opinion_changed": "변경됨/유지됨",
+  "reason_for_change": "의견이 바뀐(혹은 유지된) 핵심 이유",
+  "current_summary": "그래프, 공시, 재무제표, 뉴스, 이동평균선 등을 종합 파악하여 10번 생각한 후 결정한 핵심 요점 분석 요약"
+}}
+"""
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.1, response_mime_type="application/json")
+        )
+        try:
+            import json
+            raw_text = response.text.strip()
+            if raw_text.startswith("```json"): raw_text = raw_text[7:]
+            elif raw_text.startswith("```"): raw_text = raw_text[3:]
+            if raw_text.endswith("```"): raw_text = raw_text[:-3]
+            data = json.loads(raw_text.strip())
+            return data
+        except Exception as e:
+            return {"error": f"JSON 파싱 오류: {str(e)}"}
+    except Exception as e:
+        return {"error": f"AI 분석 오류: {str(e)}"}
+
 def save_report_callback(ticker, name, raw_data, category="미분류", subcategory="없음"):
     if raw_data:
         optimized_data = {
@@ -652,10 +765,60 @@ if st.session_state.viewing_saved_report:
         st.markdown("---")
         st.markdown("### 📊 당시 분석 요약")
         st.write(raw_data.get('summary', '-'))
+        
+        st.markdown("---")
+        st.markdown("### 🔄 현재 시점 AI 재평가")
+        st.caption("실시간 데이터를 수집하여 과거 의견과 현재 상황을 비교합니다.")
+        if st.button("현재 시점 데이터로 다시 의견 묻기", type="secondary", use_container_width=True):
+            with st.spinner("최신 데이터를 수집하고 AI가 10번 이상 검증 분석 중입니다..."):
+                import data_fetcher
+                latest_data = data_fetcher.fetch_stock_data(report_data['ticker'])
+                if "error" in latest_data:
+                    st.error("최신 데이터를 불러오는데 실패했습니다.")
+                else:
+                    reeval_result = get_ai_reevaluation(get_saved_api_key(), latest_data, raw_data.get('opinion', ''), raw_data.get('summary', ''))
+                    if "error" in reeval_result:
+                        st.error(reeval_result["error"])
+                    else:
+                        st.success("재평가 완료!")
+                        st.markdown(f"**현재 투자 의견**: {reeval_result.get('current_opinion', '-')} ({reeval_result.get('opinion_changed', '-')})")
+                        st.markdown(f"**변경(유지) 이유**: {reeval_result.get('reason_for_change', '-')}")
+                        st.markdown("**10중 검증 핵심 요약**: " + reeval_result.get('current_summary', '-'))
+
     else:
         st.warning("이 리포트는 예전 텍스트 형식으로 저장되어 있어 요약 및 비교 기능을 지원하지 않습니다.")
         st.markdown(f"<div class='ai-box'>{report_data['report_text']}</div>", unsafe_allow_html=True)
     
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    st.markdown("### 🗂️ 폴더 이동 (카테고리 변경)")
+    current_cat = raw_data.get('category', '미분류') if raw_data else '미분류'
+    current_subcat = raw_data.get('subcategory', '없음') if raw_data else '없음'
+    
+    cat_col1, cat_col2, cat_col3 = st.columns([2, 2, 1])
+    with cat_col1:
+        opts_cat = ["보유주식", "관심주식", "미분류"]
+        idx_cat = opts_cat.index(current_cat) if current_cat in opts_cat else 2
+        new_category = st.selectbox("새 분류", opts_cat, index=idx_cat, key="update_cat")
+    with cat_col2:
+        subcat_options = ["없음"]
+        if new_category == "보유주식": subcat_options = ["투자", "퇴직"]
+        elif new_category == "관심주식": subcat_options = ["1", "2", "3"]
+        try:
+            sub_index = subcat_options.index(current_subcat)
+        except:
+            sub_index = 0
+        new_subcategory = st.selectbox("새 하위 폴더", subcat_options, index=sub_index, key="update_subcat")
+    with cat_col3:
+        st.write("")
+        st.write("")
+        if st.button("적용", use_container_width=True):
+            report_key = f"{report_data['name']} ({report_data['ticker']}) - {report_data['timestamp']}"
+            update_report_category(report_key, report_data, new_category, new_subcategory)
+            st.session_state.just_saved = True
+            st.session_state.viewing_saved_report = None
+            st.rerun()
+
     st.markdown("<br>", unsafe_allow_html=True)
     
     col_btn1, col_btn2 = st.columns(2)
