@@ -235,13 +235,78 @@ def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
 
 [요청 사항]
 과거 의견과 현재 데이터를 철저히 비교하여, **현재 시점의 최종 투자 의견**을 도출하고, **의견이 변경되었다면 그 이유**를 명확히 설명해주세요.
+특히, 사용자가 이 주식을 이미 보유 중인 경우와 미보유 중인 경우를 나누어서 명확한 액션 플랜을 제공해야 합니다.
 답변은 아래 JSON 형식으로만 반환하세요:
 {{
-  "current_opinion": "매수/보유/매도 중 1개 (현재 의견)",
-  "opinion_changed": "변경됨/유지됨",
+  "opinion_if_holding": "보유 중인 경우: 매도 / 추가 매수 / 보유 유지 중 1개 추천 및 간략한 이유",
+  "opinion_if_not_holding": "미보유 중인 경우: 신규 매수 / 관망(보류) 중 1개 추천 및 간략한 이유",
+  "opinion_changed": "과거 대비: 변경됨/유지됨",
   "reason_for_change": "의견이 바뀐(혹은 유지된) 핵심 이유",
   "current_summary": "그래프, 공시, 재무제표, 뉴스, 이동평균선 등을 종합 파악하여 10번 생각한 후 결정한 핵심 요점 분석 요약"
 }}
+"""
+        response = model.generate_content(
+            prompt,
+            generation_config=genai.types.GenerationConfig(temperature=0.1, response_mime_type="application/json")
+        )
+        try:
+            import json
+            raw_text = response.text.strip()
+            if raw_text.startswith("```json"): raw_text = raw_text[7:]
+            elif raw_text.startswith("```"): raw_text = raw_text[3:]
+            if raw_text.endswith("```"): raw_text = raw_text[:-3]
+            data = json.loads(raw_text.strip())
+            return data
+        except Exception as e:
+            return {"error": f"JSON 파싱 오류: {str(e)}"}
+    except Exception as e:
+        return {"error": f"AI 분석 오류: {str(e)}"}
+
+def analyze_error_reasons(api_key, stock_name, ticker, comp_data):
+    if not api_key:
+        return {"error": "⚠️ API 키가 제공되지 않았습니다."}
+    try:
+        genai.configure(api_key=api_key)
+        valid_models = []
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                valid_models.append(m.name)
+        if not valid_models:
+            return {"error": "❌ 사용 가능한 Gemini 모델이 없습니다."}
+        model_name = valid_models[0]
+        for pref in ['models/gemini-1.5-flash-latest', 'models/gemini-1.5-flash', 'models/gemini-1.5-pro']:
+            if pref in valid_models:
+                model_name = pref
+                break
+        model = genai.GenerativeModel(model_name)
+        
+        prompt = f"""
+당신은 최고의 주식 분석가입니다.
+종목 '{stock_name} ({ticker})'에 대해 과거 AI가 주가를 예측했고, 현재 실제 주가와 비교한 결과입니다.
+
+[비교 데이터]
+"""
+        valid_count = 0
+        for i in range(5):
+            period = comp_data['기간'][i]
+            pred = comp_data['AI 예상 주가'][i]
+            actual = comp_data['실제 종가'][i]
+            acc = comp_data['예측 대비 실제 (오차율%)'][i]
+            reason = comp_data['예측 근거'][i]
+            if actual != "아직 도달 안 함" and actual != "데이터 없음":
+                prompt += f"- {period}: 예측가 {pred} vs 실제가 {actual} (오차: {acc}) / 기존 예측 근거: {reason}\n"
+                valid_count += 1
+                
+        if valid_count == 0:
+            return {"error": "아직 실제 주가가 도달한 기간이 없어 분석할 오차가 없습니다."}
+            
+        prompt += """
+위 데이터에서 오차가 발생한 항목들(또는 일치한 항목들)에 대해, **왜 예측이 빗나갔는지 혹은 왜 맞았는지 사후 분석(오차 원인)**을 각각 1~2문장으로 짧게 작성해주세요.
+답변은 아래 JSON 형식으로 반환하세요. 키값은 기간 이름(1일 뒤, 1주일 뒤, 1개월 뒤, 6개월 뒤, 1년 뒤) 중 데이터가 있는 것만 정확히 일치시켜서 포함하세요.
+{
+  "1일 뒤": "오차 원인 분석 내용...",
+  "1주일 뒤": "오차 원인 분석 내용..."
+}
 """
         response = model.generate_content(
             prompt,
@@ -750,7 +815,29 @@ if st.session_state.viewing_saved_report:
             "예측 근거": [s11.get('day1_reason', '-'), s11.get('week1_reason', '-'), s11.get('month1_reason', '-'), s11.get('month6_reason', '-'), s11.get('year1_reason', '-')]
         }
         
-        st.dataframe(pd.DataFrame(comp_data), use_container_width=True, hide_index=True)
+        if st.button("🔍 예측 오차 원인 AI 사후 분석", use_container_width=True):
+            with st.spinner("과거 예측과 실제 주가 간의 오차 발생 원인을 AI가 분석하고 있습니다..."):
+                error_reasons = analyze_error_reasons(get_saved_api_key(), report_data['name'], report_data['ticker'], comp_data)
+                if "error" in error_reasons:
+                    st.error(error_reasons["error"])
+                else:
+                    new_reasons = []
+                    for i in range(5):
+                        period = comp_data["기간"][i]
+                        base_reason = comp_data["예측 근거"][i]
+                        if period in error_reasons:
+                            new_reasons.append(f"{base_reason}\n\n[오차 이유 분석]: {error_reasons[period]}")
+                        else:
+                            new_reasons.append(base_reason)
+                    comp_data["예측 근거 및 오차 이유 분석"] = new_reasons
+                    del comp_data["예측 근거"]
+        elif "예측 근거 및 오차 이유 분석" not in comp_data:
+            # If not analyzed, we keep it as "예측 근거 및 오차 이유 분석" so the column name is consistent 
+            # (or just rename it so the table stretches the same way).
+            comp_data["예측 근거 및 오차 이유 분석"] = comp_data.pop("예측 근거")
+        
+        # Use st.table instead of st.dataframe to auto-wrap text perfectly
+        st.table(pd.DataFrame(comp_data).set_index("기간"))
         
         st.markdown("---")
         st.markdown("### ⚖️ 최종 투자 의견 (당시 기준)")
@@ -781,8 +868,9 @@ if st.session_state.viewing_saved_report:
                         st.error(reeval_result["error"])
                     else:
                         st.success("재평가 완료!")
-                        st.markdown(f"**현재 투자 의견**: {reeval_result.get('current_opinion', '-')} ({reeval_result.get('opinion_changed', '-')})")
-                        st.markdown(f"**변경(유지) 이유**: {reeval_result.get('reason_for_change', '-')}")
+                        st.markdown(f"**현재 투자 의견 (보유자)**: {reeval_result.get('opinion_if_holding', '-')}")
+                        st.markdown(f"**현재 투자 의견 (미보유자)**: {reeval_result.get('opinion_if_not_holding', '-')}")
+                        st.markdown(f"**과거 대비 스탠스**: {reeval_result.get('opinion_changed', '-')} (이유: {reeval_result.get('reason_for_change', '-')})")
                         st.markdown("**10중 검증 핵심 요약**: " + reeval_result.get('current_summary', '-'))
 
     else:
