@@ -315,7 +315,7 @@ def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
             if raw_text.startswith("```json"): raw_text = raw_text[7:]
             elif raw_text.startswith("```"): raw_text = raw_text[3:]
             if raw_text.endswith("```"): raw_text = raw_text[:-3]
-            data = json.loads(raw_text.strip())
+            data = json.loads(raw_text.strip(), strict=False)
             return data
         except Exception as e:
             return {"error": f"JSON 파싱 오류: {str(e)}"}
@@ -392,7 +392,7 @@ def analyze_error_reasons(api_key, stock_name, ticker, comp_data, latest_stock_d
             if raw_text.startswith("```json"): raw_text = raw_text[7:]
             elif raw_text.startswith("```"): raw_text = raw_text[3:]
             if raw_text.endswith("```"): raw_text = raw_text[:-3]
-            data = json.loads(raw_text.strip())
+            data = json.loads(raw_text.strip(), strict=False)
             return data
         except Exception as e:
             return {"error": f"JSON 파싱 오류: {str(e)}"}
@@ -644,7 +644,7 @@ JSON 스키마:
             if raw_text.endswith("```"):
                 raw_text = raw_text[:-3]
                 
-            data = json.loads(raw_text.strip())
+            data = json.loads(raw_text.strip(), strict=False)
             
             # Helper function to prevent KeyError if step11 is somehow missing
             s11 = data.get('step11', {})
