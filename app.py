@@ -176,6 +176,58 @@ def update_report_category(key, report_data, new_cat, new_subcat):
             except:
                 pass
 
+def save_reevaluation_callback(key, report_data, reeval_result):
+    try:
+        raw_data = json.loads(report_data.get('report_text', '{}'))
+    except:
+        raw_data = {}
+        
+    if "history" not in raw_data:
+        raw_data["history"] = []
+        
+    import datetime
+    kst = datetime.timezone(datetime.timedelta(hours=9))
+    timestamp_kst = datetime.datetime.now(kst).strftime("%Y-%m-%d %H:%M:%S")
+    
+    new_eval = {
+        "timestamp": timestamp_kst,
+        "opinion_if_holding": reeval_result.get("opinion_if_holding", ""),
+        "opinion_if_not_holding": reeval_result.get("opinion_if_not_holding", ""),
+        "opinion_changed": reeval_result.get("opinion_changed", ""),
+        "reason_for_change": reeval_result.get("reason_for_change", ""),
+        "summary": reeval_result.get("current_summary", ""),
+        "step11": reeval_result.get("step11", {})
+    }
+    raw_data["history"].append(new_eval)
+    
+    new_report_text = json.dumps(raw_data, ensure_ascii=False)
+    
+    if supabase:
+        try:
+            if 'id' in report_data:
+                supabase.table("saved_reports").update({"report_text": new_report_text}).eq("id", report_data['id']).execute()
+            else:
+                supabase.table("saved_reports").update({"report_text": new_report_text}).eq("timestamp", report_data['timestamp']).eq("ticker", report_data['ticker']).execute()
+        except Exception as e:
+            st.error(f"히스토리 업데이트 오류: {e}")
+            return
+    else:
+        if os.path.exists(REPORTS_FILE):
+            try:
+                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                    reports = json.load(f)
+                if key in reports:
+                    reports[key]['report_text'] = new_report_text
+                with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+                    json.dump(reports, f, ensure_ascii=False, indent=4)
+            except Exception as e:
+                st.error(f"히스토리 파일 저장 오류: {e}")
+                return
+    
+    # Update current session state to reflect changes immediately
+    st.session_state.viewing_saved_report['report_text'] = new_report_text
+    st.session_state.just_saved = True
+
 def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
     if not api_key:
         return {"error": "⚠️ API 키가 제공되지 않았습니다."}
@@ -235,6 +287,7 @@ def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
 
 [요청 사항]
 과거 의견과 현재 데이터를 철저히 비교하여, **현재 시점의 최종 투자 의견**을 도출하고, **의견이 변경되었다면 그 이유**를 명확히 설명해주세요.
+또한, **현재 시점을 기준으로** 1일 뒤, 1주일 뒤, 1개월 뒤, 6개월 뒤, 1년 뒤의 새로운 예상 주가 시뮬레이션을 반드시 제공해야 합니다.
 특히, 사용자가 이 주식을 이미 보유 중인 경우와 미보유 중인 경우를 나누어서 명확한 액션 플랜을 제공해야 합니다.
 답변은 아래 JSON 형식으로만 반환하세요:
 {{
@@ -242,7 +295,14 @@ def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
   "opinion_if_not_holding": "미보유 중인 경우: 신규 매수 / 관망(보류) 중 1개 추천 및 간략한 이유",
   "opinion_changed": "과거 대비: 변경됨/유지됨",
   "reason_for_change": "의견이 바뀐(혹은 유지된) 핵심 이유",
-  "current_summary": "그래프, 공시, 재무제표, 뉴스, 이동평균선 등을 종합 파악하여 10번 생각한 후 결정한 핵심 요점 분석 요약"
+  "current_summary": "그래프, 공시, 재무제표, 뉴스, 이동평균선 등을 종합 파악하여 10번 생각한 후 결정한 핵심 요점 분석 요약",
+  "step11": {{
+    "day1_price": "가격 (숫자만)", "day1_trend": "상승/하락/보합", "day1_reason": "간단한 이유",
+    "week1_price": "가격 (숫자만)", "week1_trend": "상승/하락/보합", "week1_reason": "간단한 이유",
+    "month1_price": "가격 (숫자만)", "month1_trend": "상승/하락/보합", "month1_reason": "간단한 이유",
+    "month6_price": "가격 (숫자만)", "month6_trend": "상승/하락/보합", "month6_reason": "간단한 이유",
+    "year1_price": "가격 (숫자만)", "year1_trend": "상승/하락/보합", "year1_reason": "간단한 이유"
+  }}
 }}
 """
         response = model.generate_content(
@@ -791,102 +851,145 @@ if st.session_state.viewing_saved_report:
         raw_data = None
         
     if raw_data and isinstance(raw_data, dict):
-        with st.spinner("과거 데이터와 실제 주가를 비교하는 중..."):
-            actual_prices = get_actual_prices(report_data['ticker'], report_data['timestamp'])
-            
-        s11 = raw_data.get('step11', {})
-        if not isinstance(s11, dict): s11 = {}
-        
-        def calc_acc(pred_str, actual_str):
-            try:
-                import re
-                pred = float(re.sub(r'[^\d.]', '', str(pred_str)))
-                actual = float(re.sub(r'[^\d.]', '', str(actual_str)))
-                diff = (actual - pred) / pred * 100
-                if diff > 0:
-                    return f"🔴 상회 (+{diff:.2f}%)"
-                elif diff < 0:
-                    return f"🔵 하회 ({diff:.2f}%)"
-                else:
-                    return "일치 (0.00%)"
-            except:
-                return "-"
-
-        st.markdown("### 🎯 예측 vs 실제 주가 검증 (성적표)")
-        
-        comp_data = {
-            "기간": ["1일 뒤", "1주일 뒤", "1개월 뒤", "6개월 뒤", "1년 뒤"],
-            "AI 예측 트렌드": [s11.get('day1_trend', '-'), s11.get('week1_trend', '-'), s11.get('month1_trend', '-'), s11.get('month6_trend', '-'), s11.get('year1_trend', '-')],
-            "AI 예상 주가": [s11.get('day1_price', '-'), s11.get('week1_price', '-'), s11.get('month1_price', '-'), s11.get('month6_price', '-'), s11.get('year1_price', '-')],
-            "실제 종가": [actual_prices.get('day1', '-'), actual_prices.get('week1', '-'), actual_prices.get('month1', '-'), actual_prices.get('month6', '-'), actual_prices.get('year1', '-')],
-            "예측 대비 실제 (오차율%)": [
-                calc_acc(s11.get('day1_price', '-'), actual_prices.get('day1', '-')),
-                calc_acc(s11.get('week1_price', '-'), actual_prices.get('week1', '-')),
-                calc_acc(s11.get('month1_price', '-'), actual_prices.get('month1', '-')),
-                calc_acc(s11.get('month6_price', '-'), actual_prices.get('month6', '-')),
-                calc_acc(s11.get('year1_price', '-'), actual_prices.get('year1', '-'))
-            ],
-            "예측 근거": [s11.get('day1_reason', '-'), s11.get('week1_reason', '-'), s11.get('month1_reason', '-'), s11.get('month6_reason', '-'), s11.get('year1_reason', '-')]
-        }
-        
-        if st.button("🔍 예측 오차 원인 AI 사후 분석", use_container_width=True):
-            with st.spinner("최신 데이터를 수집하고 오차 발생 원인을 구체적으로 분석하고 있습니다..."):
-                import data_fetcher
-                latest_data = data_fetcher.fetch_stock_data(report_data['ticker'])
-                if "error" in latest_data:
-                    st.error("최신 데이터를 불러오는데 실패하여 상세 팩트 기반 원인 분석이 제한될 수 있습니다.")
-                    latest_data = None
-                    
-                error_reasons = analyze_error_reasons(get_saved_api_key(), report_data['name'], report_data['ticker'], comp_data, latest_data)
+        history_list = [{"timestamp": report_data['timestamp'], "data": raw_data, "is_first": True}]
+        if "history" in raw_data:
+            for item in raw_data["history"]:
+                history_list.append({"timestamp": item['timestamp'], "data": item, "is_first": False})
                 
-                if "error" in error_reasons:
-                    st.error(error_reasons["error"])
-                else:
-                    error_reasons_list = []
-                    for i in range(5):
-                        period = comp_data["기간"][i]
-                        if period in error_reasons:
-                            error_reasons_list.append(error_reasons[period])
+        for idx, eval_entry in enumerate(history_list):
+            v_num = idx + 1
+            ts = eval_entry['timestamp']
+            v_data = eval_entry['data']
+            is_first = eval_entry['is_first']
+            
+            with st.expander(f"📌 {v_num}차 분석 ({ts})", expanded=(idx == len(history_list)-1)):
+                with st.spinner("과거 데이터와 실제 주가를 비교하는 중..."):
+                    actual_prices = get_actual_prices(report_data['ticker'], ts)
+                    
+                s11 = v_data.get('step11', {})
+                if not isinstance(s11, dict): s11 = {}
+                
+                def calc_acc(pred_str, actual_str):
+                    try:
+                        import re
+                        pred = float(re.sub(r'[^\d.]', '', str(pred_str)))
+                        actual = float(re.sub(r'[^\d.]', '', str(actual_str)))
+                        diff = (actual - pred) / pred * 100
+                        if diff > 0:
+                            return f"🔴 상회 (+{diff:.2f}%)"
+                        elif diff < 0:
+                            return f"🔵 하회 ({diff:.2f}%)"
                         else:
-                            error_reasons_list.append("-")
-                    comp_data["오차 원인 분석"] = error_reasons_list
-        
-        # Use st.table instead of st.dataframe to auto-wrap text perfectly
-        st.table(pd.DataFrame(comp_data).set_index("기간"))
-        
-        st.markdown("---")
-        st.markdown("### ⚖️ 최종 투자 의견 (당시 기준)")
-        st.info(f"**결론**: {raw_data.get('opinion', '-')}\n\n**핵심 이유**: {raw_data.get('opinion_reason', '-')}")
-        
-        cols = st.columns(4)
-        cols[0].metric("매수 타점", raw_data.get('entry_price', '-'))
-        cols[1].metric("단기 목표가", raw_data.get('target_short', '-'))
-        cols[2].metric("중장기 목표가", raw_data.get('target_long', '-'))
-        cols[3].metric("손절가", raw_data.get('stop_loss', '-'))
-        
-        st.markdown("---")
-        st.markdown("### 📊 당시 분석 요약")
-        st.write(raw_data.get('summary', '-'))
-        
+                            return "일치 (0.00%)"
+                    except:
+                        return "-"
+
+                st.markdown(f"### 🎯 예측 vs 실제 주가 검증 ({v_num}차 성적표)")
+                
+                comp_data = {
+                    "기간": ["1일 뒤", "1주일 뒤", "1개월 뒤", "6개월 뒤", "1년 뒤"],
+                    "AI 예측 트렌드": [s11.get('day1_trend', '-'), s11.get('week1_trend', '-'), s11.get('month1_trend', '-'), s11.get('month6_trend', '-'), s11.get('year1_trend', '-')],
+                    "AI 예상 주가": [s11.get('day1_price', '-'), s11.get('week1_price', '-'), s11.get('month1_price', '-'), s11.get('month6_price', '-'), s11.get('year1_price', '-')],
+                    "실제 종가": [actual_prices.get('day1', '-'), actual_prices.get('week1', '-'), actual_prices.get('month1', '-'), actual_prices.get('month6', '-'), actual_prices.get('year1', '-')],
+                    "예측 대비 실제 (오차율%)": [
+                        calc_acc(s11.get('day1_price', '-'), actual_prices.get('day1', '-')),
+                        calc_acc(s11.get('week1_price', '-'), actual_prices.get('week1', '-')),
+                        calc_acc(s11.get('month1_price', '-'), actual_prices.get('month1', '-')),
+                        calc_acc(s11.get('month6_price', '-'), actual_prices.get('month6', '-')),
+                        calc_acc(s11.get('year1_price', '-'), actual_prices.get('year1', '-'))
+                    ],
+                    "예측 근거": [s11.get('day1_reason', '-'), s11.get('week1_reason', '-'), s11.get('month1_reason', '-'), s11.get('month6_reason', '-'), s11.get('year1_reason', '-')]
+                }
+                
+                if st.button(f"🔍 예측 오차 원인 AI 사후 분석 ({v_num}차)", key=f"err_btn_{idx}", use_container_width=True):
+                    with st.spinner("최신 데이터를 수집하고 오차 발생 원인을 구체적으로 분석하고 있습니다..."):
+                        import data_fetcher
+                        latest_data = data_fetcher.fetch_stock_data(report_data['ticker'])
+                        if "error" in latest_data:
+                            st.error("최신 데이터를 불러오는데 실패하여 상세 팩트 기반 원인 분석이 제한될 수 있습니다.")
+                            latest_data = None
+                            
+                        error_reasons = analyze_error_reasons(get_saved_api_key(), report_data['name'], report_data['ticker'], comp_data, latest_data)
+                        
+                        if "error" in error_reasons:
+                            st.error(error_reasons["error"])
+                        else:
+                            error_reasons_list = []
+                            for i in range(5):
+                                period = comp_data["기간"][i]
+                                if period in error_reasons:
+                                    error_reasons_list.append(error_reasons[period])
+                                else:
+                                    error_reasons_list.append("-")
+                            comp_data["오차 원인 분석"] = error_reasons_list
+                
+                # Use st.table instead of st.dataframe to auto-wrap text perfectly
+                st.table(pd.DataFrame(comp_data).set_index("기간"))
+                
+                st.markdown("---")
+                if is_first:
+                    st.markdown("### ⚖️ 최종 투자 의견 (당시 기준)")
+                    st.info(f"**결론**: {v_data.get('opinion', '-')}\n\n**핵심 이유**: {v_data.get('opinion_reason', '-')}")
+                    
+                    cols = st.columns(4)
+                    cols[0].metric("매수 타점", v_data.get('entry_price', '-'))
+                    cols[1].metric("단기 목표가", v_data.get('target_short', '-'))
+                    cols[2].metric("중장기 목표가", v_data.get('target_long', '-'))
+                    cols[3].metric("손절가", v_data.get('stop_loss', '-'))
+                else:
+                    st.markdown("### ⚖️ 현재 투자 의견 (재평가 당시)")
+                    st.info(f"**보유자 추천**: {v_data.get('opinion_if_holding', '-')}\n\n**미보유자 추천**: {v_data.get('opinion_if_not_holding', '-')}\n\n**과거 대비 스탠스**: {v_data.get('opinion_changed', '-')} (이유: {v_data.get('reason_for_change', '-')})")
+                
+                st.markdown("---")
+                st.markdown("### 📊 당시 분석 요약")
+                st.write(v_data.get('summary', '-'))
+                
         st.markdown("---")
         st.markdown("### 🔄 현재 시점 AI 재평가")
         st.caption("실시간 데이터를 수집하여 과거 의견과 현재 상황을 비교합니다.")
-        if st.button("현재 시점 데이터로 다시 의견 묻기", type="secondary", use_container_width=True):
+        
+        if "reeval_result" not in st.session_state:
+            st.session_state.reeval_result = None
+            
+        if st.button("새로운 재평가 받기", type="secondary", use_container_width=True):
+            st.session_state.reeval_result = None # Clear previous
             with st.spinner("최신 데이터를 수집하고 AI가 10번 이상 검증 분석 중입니다..."):
                 import data_fetcher
                 latest_data = data_fetcher.fetch_stock_data(report_data['ticker'])
                 if "error" in latest_data:
                     st.error("최신 데이터를 불러오는데 실패했습니다.")
                 else:
-                    reeval_result = get_ai_reevaluation(get_saved_api_key(), latest_data, raw_data.get('opinion', ''), raw_data.get('summary', ''))
+                    past_opinion = history_list[-1]['data'].get('opinion', '') if history_list[-1]['is_first'] else history_list[-1]['data'].get('opinion_if_holding', '')
+                    past_summary = history_list[-1]['data'].get('summary', '')
+                    reeval_result = get_ai_reevaluation(get_saved_api_key(), latest_data, past_opinion, past_summary)
                     if "error" in reeval_result:
                         st.error(reeval_result["error"])
                     else:
-                        st.success("재평가 완료!")
-                        st.markdown(f"**현재 투자 의견 (보유자)**: {reeval_result.get('opinion_if_holding', '-')}")
-                        st.markdown(f"**현재 투자 의견 (미보유자)**: {reeval_result.get('opinion_if_not_holding', '-')}")
-                        st.markdown(f"**과거 대비 스탠스**: {reeval_result.get('opinion_changed', '-')} (이유: {reeval_result.get('reason_for_change', '-')})")
-                        st.markdown("**10중 검증 핵심 요약**: " + reeval_result.get('current_summary', '-'))
+                        st.session_state.reeval_result = reeval_result
+                        
+        if st.session_state.reeval_result:
+            reeval_result = st.session_state.reeval_result
+            st.success("재평가 완료!")
+            st.markdown(f"**현재 투자 의견 (보유자)**: {reeval_result.get('opinion_if_holding', '-')}")
+            st.markdown(f"**현재 투자 의견 (미보유자)**: {reeval_result.get('opinion_if_not_holding', '-')}")
+            st.markdown(f"**과거 대비 스탠스**: {reeval_result.get('opinion_changed', '-')} (이유: {reeval_result.get('reason_for_change', '-')})")
+            st.markdown("**10중 검증 핵심 요약**: " + reeval_result.get('current_summary', '-'))
+            
+            st.markdown("#### 새로운 목표가 시뮬레이션")
+            s11_new = reeval_result.get('step11', {})
+            comp_data_new = {
+                "기간": ["1일 뒤", "1주일 뒤", "1개월 뒤", "6개월 뒤", "1년 뒤"],
+                "AI 예측 트렌드": [s11_new.get('day1_trend', '-'), s11_new.get('week1_trend', '-'), s11_new.get('month1_trend', '-'), s11_new.get('month6_trend', '-'), s11_new.get('year1_trend', '-')],
+                "AI 예상 주가": [s11_new.get('day1_price', '-'), s11_new.get('week1_price', '-'), s11_new.get('month1_price', '-'), s11_new.get('month6_price', '-'), s11_new.get('year1_price', '-')],
+                "예측 근거": [s11_new.get('day1_reason', '-'), s11_new.get('week1_reason', '-'), s11_new.get('month1_reason', '-'), s11_new.get('month6_reason', '-'), s11_new.get('year1_reason', '-')]
+            }
+            st.table(pd.DataFrame(comp_data_new).set_index("기간"))
+            
+            if st.button("💾 이 재평가 결과를 새로운 차수 예측으로 저장하기", type="primary", use_container_width=True):
+                report_key = f"{report_data['name']} ({report_data['ticker']}) - {report_data['timestamp']}"
+                save_reevaluation_callback(report_key, report_data, reeval_result)
+                st.session_state.reeval_result = None
+                st.rerun()
 
     else:
         st.warning("이 리포트는 예전 텍스트 형식으로 저장되어 있어 요약 및 비교 기능을 지원하지 않습니다.")
