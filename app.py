@@ -262,7 +262,7 @@ def get_ai_reevaluation(api_key, stock_data, past_opinion, past_summary):
     except Exception as e:
         return {"error": f"AI 분석 오류: {str(e)}"}
 
-def analyze_error_reasons(api_key, stock_name, ticker, comp_data):
+def analyze_error_reasons(api_key, stock_name, ticker, comp_data, latest_stock_data):
     if not api_key:
         return {"error": "⚠️ API 키가 제공되지 않았습니다."}
     try:
@@ -300,8 +300,22 @@ def analyze_error_reasons(api_key, stock_name, ticker, comp_data):
         if valid_count == 0:
             return {"error": "아직 실제 주가가 도달한 기간이 없어 분석할 오차가 없습니다."}
             
+        if latest_stock_data:
+            info = latest_stock_data.get('info', {})
+            news_text = "\n".join([f"- {n}" for n in info.get('news', [])])
+            disc_text = "\n".join([f"- {d}" for n, d in enumerate(info.get('disclosures', []))])
+            prompt += f"""
+[최신 참고 자료]
+아래 최신 뉴스와 공시 자료를 바탕으로, 두루뭉술한 표현(예: 단순 매수세 유입, 긍정적 이슈 발생 등)을 절대 사용하지 마세요.
+반드시 **정확히 어떤 이슈나 뉴스, 공시 때문에 주가가 예상과 달라졌는지(또는 일치했는지) 구체적인 팩트**를 찾아서 그 이유를 설명해야 합니다.
+- 최근 뉴스:
+{news_text}
+- 최근 공시:
+{disc_text}
+"""
+            
         prompt += """
-위 데이터에서 오차가 발생한 항목들(또는 일치한 항목들)에 대해, **왜 예측이 빗나갔는지 혹은 왜 맞았는지 사후 분석(오차 원인)**을 각각 1~2문장으로 짧게 작성해주세요.
+위 데이터에서 오차가 발생한 항목들(또는 일치한 항목들)에 대해, **왜 예측이 빗나갔는지 혹은 왜 맞았는지 사후 분석(오차 원인)**을 각각 1~2문장으로 구체적 팩트를 들어 짧게 작성해주세요.
 답변은 아래 JSON 형식으로 반환하세요. 키값은 기간 이름(1일 뒤, 1주일 뒤, 1개월 뒤, 6개월 뒤, 1년 뒤) 중 데이터가 있는 것만 정확히 일치시켜서 포함하세요.
 {
   "1일 뒤": "오차 원인 분석 내용...",
@@ -816,25 +830,26 @@ if st.session_state.viewing_saved_report:
         }
         
         if st.button("🔍 예측 오차 원인 AI 사후 분석", use_container_width=True):
-            with st.spinner("과거 예측과 실제 주가 간의 오차 발생 원인을 AI가 분석하고 있습니다..."):
-                error_reasons = analyze_error_reasons(get_saved_api_key(), report_data['name'], report_data['ticker'], comp_data)
+            with st.spinner("최신 데이터를 수집하고 오차 발생 원인을 구체적으로 분석하고 있습니다..."):
+                import data_fetcher
+                latest_data = data_fetcher.fetch_stock_data(report_data['ticker'])
+                if "error" in latest_data:
+                    st.error("최신 데이터를 불러오는데 실패하여 상세 팩트 기반 원인 분석이 제한될 수 있습니다.")
+                    latest_data = None
+                    
+                error_reasons = analyze_error_reasons(get_saved_api_key(), report_data['name'], report_data['ticker'], comp_data, latest_data)
+                
                 if "error" in error_reasons:
                     st.error(error_reasons["error"])
                 else:
-                    new_reasons = []
+                    error_reasons_list = []
                     for i in range(5):
                         period = comp_data["기간"][i]
-                        base_reason = comp_data["예측 근거"][i]
                         if period in error_reasons:
-                            new_reasons.append(f"{base_reason}\n\n[오차 이유 분석]: {error_reasons[period]}")
+                            error_reasons_list.append(error_reasons[period])
                         else:
-                            new_reasons.append(base_reason)
-                    comp_data["예측 근거 및 오차 이유 분석"] = new_reasons
-                    del comp_data["예측 근거"]
-        elif "예측 근거 및 오차 이유 분석" not in comp_data:
-            # If not analyzed, we keep it as "예측 근거 및 오차 이유 분석" so the column name is consistent 
-            # (or just rename it so the table stretches the same way).
-            comp_data["예측 근거 및 오차 이유 분석"] = comp_data.pop("예측 근거")
+                            error_reasons_list.append("-")
+                    comp_data["오차 원인 분석"] = error_reasons_list
         
         # Use st.table instead of st.dataframe to auto-wrap text perfectly
         st.table(pd.DataFrame(comp_data).set_index("기간"))
