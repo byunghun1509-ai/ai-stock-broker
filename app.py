@@ -7,6 +7,12 @@ import json
 import os
 from datetime import datetime, timedelta
 
+def safe_rerun():
+    try:
+        st.rerun()
+    except AttributeError:
+        st.experimental_rerun()
+
 def get_actual_prices(ticker, saved_timestamp_str):
     try:
         saved_date = datetime.strptime(saved_timestamp_str, "%Y-%m-%d %H:%M:%S")
@@ -87,34 +93,53 @@ REPORTS_FILE = "saved_reports.json"
 
 # Initialize Supabase client if secrets are present
 supabase: Client = None
+supabase_url_display: str = ""
 try:
     if "SUPABASE_URL" in st.secrets and "SUPABASE_KEY" in st.secrets:
-        url = st.secrets["SUPABASE_URL"]
-        key = st.secrets["SUPABASE_KEY"]
+        url = st.secrets["SUPABASE_URL"].strip().strip('"').strip("'").strip("/")
+        if not url.startswith("http://") and not url.startswith("https://"):
+            url = "https://" + url
+        key = st.secrets["SUPABASE_KEY"].strip().strip('"').strip("'")
         supabase = create_client(url, key)
+        supabase_url_display = url
 except Exception:
     pass
 
 def load_saved_reports():
+    reports = {}
+    
+    # First, always load from the local file if it exists
+    if os.path.exists(REPORTS_FILE):
+        try:
+            with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    reports.update(data)
+                elif isinstance(data, list):
+                    # Convert legacy list to dictionary format
+                    for item in data:
+                        if isinstance(item, dict):
+                            key = f"{item.get('name', '알수없음')} ({item.get('ticker', '알수없음')}) - {item.get('timestamp', '')}"
+                            reports[key] = item
+        except Exception:
+            pass
+            
+    # Then, if Supabase is available, query and merge
     if supabase:
         try:
             response = supabase.table("saved_reports").select("*").order('timestamp', desc=True).execute()
-            reports = {}
             for row in response.data:
-                key = f"{row['name']} ({row['ticker']}) - {row['timestamp']}"
+                key = f"{row.get('name', '알수없음')} ({row.get('ticker', '알수없음')}) - {row.get('timestamp', '')}"
                 reports[key] = row
-            return reports
         except Exception as e:
-            st.error(f"Supabase 연결 오류: {e}")
-            return {}
-    else:
-        if os.path.exists(REPORTS_FILE):
-            try:
-                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except:
-                return {}
-        return {}
+            msg = f"Supabase 연결 오류로 로컬 데이터만 표시합니다. (이유: {e})"
+            if supabase_url_display:
+                msg += f"\n\n⚙️ **현재 연결 시도한 Supabase URL**: `{supabase_url_display}`"
+                if "your-project" in supabase_url_display or "placeholder" in supabase_url_display or "example" in supabase_url_display:
+                    msg += "\n\n⚠️ **주의**: 현재 설정된 URL이 **예시용 플레이스홀더 주소**로 보입니다. 실제 Supabase 프로젝트의 API URL로 변경해 주셔야 온라인 저장이 가능합니다."
+            st.warning(msg)
+            
+    return reports
 
 def save_report_to_file(ticker, name, raw_data):
     timestamp = (datetime.utcnow() + timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")
@@ -122,6 +147,9 @@ def save_report_to_file(ticker, name, raw_data):
     
     report_text = json.dumps(raw_data, ensure_ascii=False) if raw_data else "{}"
     
+    saved_successfully = False
+    
+    # 1. Try saving to Supabase first
     if supabase:
         try:
             supabase.table("saved_reports").insert({
@@ -130,9 +158,12 @@ def save_report_to_file(ticker, name, raw_data):
                 "timestamp": timestamp,
                 "report_text": report_text
             }).execute()
+            saved_successfully = True
         except Exception as e:
-            st.error(f"Supabase 저장 오류: {e}")
-    else:
+            st.warning(f"Supabase 저장 오류 ({e}). 로컬 저장소에 저장합니다.")
+            
+    # 2. Always save locally as well (either as a fallback or for local sync)
+    try:
         reports = load_saved_reports()
         reports[key] = {
             "ticker": ticker,
@@ -142,10 +173,15 @@ def save_report_to_file(ticker, name, raw_data):
         }
         with open(REPORTS_FILE, "w", encoding="utf-8") as f:
             json.dump(reports, f, ensure_ascii=False, indent=4)
+        if not saved_successfully and supabase:
+            st.info("리포트가 로컬 저장소에 백업되었습니다.")
+    except Exception as file_err:
+        st.error(f"로컬 파일 저장 오류: {file_err}")
             
     return key
 
 def delete_report(key, report_data):
+    # Try deleting from Supabase
     if supabase:
         try:
             if 'id' in report_data:
@@ -153,18 +189,20 @@ def delete_report(key, report_data):
             else:
                 supabase.table("saved_reports").delete().eq("timestamp", report_data['timestamp']).eq("ticker", report_data['ticker']).execute()
         except Exception as e:
-            st.error(f"삭제 오류: {e}")
-    else:
+            st.warning(f"Supabase 삭제 실패: {e}")
+            
+    # Always delete from local file
+    try:
+        reports = {}
         if os.path.exists(REPORTS_FILE):
-            try:
-                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
-                    reports = json.load(f)
-                if key in reports:
-                    del reports[key]
-                with open(REPORTS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(reports, f, ensure_ascii=False, indent=4)
-            except:
-                pass
+            with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                reports = json.load(f)
+        if key in reports:
+            del reports[key]
+        with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=4)
+    except Exception:
+        pass
 
 def update_report_category(key, report_data, new_cat, new_subcat):
     try:
@@ -175,6 +213,7 @@ def update_report_category(key, report_data, new_cat, new_subcat):
     raw_data['subcategory'] = new_subcat
     new_report_text = json.dumps(raw_data, ensure_ascii=False)
     
+    # Try updating Supabase
     if supabase:
         try:
             if 'id' in report_data:
@@ -182,18 +221,20 @@ def update_report_category(key, report_data, new_cat, new_subcat):
             else:
                 supabase.table("saved_reports").update({"report_text": new_report_text}).eq("timestamp", report_data['timestamp']).eq("ticker", report_data['ticker']).execute()
         except Exception as e:
-            st.error(f"카테고리 업데이트 오류: {e}")
-    else:
+            st.warning(f"Supabase 카테고리 업데이트 실패: {e}")
+            
+    # Always update local file
+    try:
+        reports = {}
         if os.path.exists(REPORTS_FILE):
-            try:
-                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
-                    reports = json.load(f)
-                if key in reports:
-                    reports[key]['report_text'] = new_report_text
-                with open(REPORTS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(reports, f, ensure_ascii=False, indent=4)
-            except:
-                pass
+            with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                reports = json.load(f)
+        if key in reports:
+            reports[key]['report_text'] = new_report_text
+        with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=4)
+    except Exception:
+        pass
 
 def save_reevaluation_callback(key, report_data, reeval_result):
     try:
@@ -221,6 +262,7 @@ def save_reevaluation_callback(key, report_data, reeval_result):
     
     new_report_text = json.dumps(raw_data, ensure_ascii=False)
     
+    # Try updating Supabase
     if supabase:
         try:
             if 'id' in report_data:
@@ -228,20 +270,26 @@ def save_reevaluation_callback(key, report_data, reeval_result):
             else:
                 supabase.table("saved_reports").update({"report_text": new_report_text}).eq("timestamp", report_data['timestamp']).eq("ticker", report_data['ticker']).execute()
         except Exception as e:
-            st.error(f"히스토리 업데이트 오류: {e}")
-            return
-    else:
+            st.warning(f"Supabase 히스토리 업데이트 실패: {e}")
+            
+    # Always update local file
+    try:
+        reports = {}
         if os.path.exists(REPORTS_FILE):
-            try:
-                with open(REPORTS_FILE, "r", encoding="utf-8") as f:
-                    reports = json.load(f)
-                if key in reports:
-                    reports[key]['report_text'] = new_report_text
-                with open(REPORTS_FILE, "w", encoding="utf-8") as f:
-                    json.dump(reports, f, ensure_ascii=False, indent=4)
-            except Exception as e:
-                st.error(f"히스토리 파일 저장 오류: {e}")
-                return
+            with open(REPORTS_FILE, "r", encoding="utf-8") as f:
+                reports = json.load(f)
+        if key not in reports:
+            reports[key] = {
+                "ticker": report_data.get('ticker', ''),
+                "name": report_data.get('name', ''),
+                "timestamp": report_data.get('timestamp', ''),
+            }
+        reports[key]['report_text'] = new_report_text
+        with open(REPORTS_FILE, "w", encoding="utf-8") as f:
+            json.dump(reports, f, ensure_ascii=False, indent=4)
+    except Exception as file_err:
+        st.error(f"히스토리 로컬 저장 오류: {file_err}")
+        return
     
     # Update current session state to reflect changes immediately
     st.session_state.viewing_saved_report['report_text'] = new_report_text
@@ -797,13 +845,13 @@ with st.sidebar:
             })
             
         if sort_order == "최신순":
-            parsed_reports.sort(key=lambda x: x['timestamp'], reverse=True)
+            parsed_reports.sort(key=lambda x: str(x['timestamp'] or ''), reverse=True)
         elif sort_order == "과거순":
-            parsed_reports.sort(key=lambda x: x['timestamp'])
+            parsed_reports.sort(key=lambda x: str(x['timestamp'] or ''))
         elif sort_order == "이름 오름차순":
-            parsed_reports.sort(key=lambda x: x['name'])
+            parsed_reports.sort(key=lambda x: str(x['name'] or ''))
         elif sort_order == "이름 내림차순":
-            parsed_reports.sort(key=lambda x: x['name'], reverse=True)
+            parsed_reports.sort(key=lambda x: str(x['name'] or ''), reverse=True)
             
         categories = {"보유주식": ["투자", "퇴직"], "관심주식": ["1", "2", "3"], "미분류": ["없음"]}
         
@@ -817,11 +865,12 @@ with st.sidebar:
                             if cat != "미분류":
                                 st.markdown(f"&nbsp;&nbsp;📂 **{subcat}**")
                             for r in subcat_reports:
-                                if st.button(f"📄 {r['name']} ({r['ticker']}) - {r['timestamp'][:10]}", key=f"btn_{r['key']}", use_container_width=True):
+                                ts_display = str(r['timestamp'])[:10] if r.get('timestamp') else "N/A"
+                                if st.button(f"📄 {r['name']} ({r['ticker']}) - {ts_display}", key=f"btn_{r['key']}", use_container_width=True):
                                     st.session_state.viewing_saved_report = r['original_data']
                                     st.session_state.stock_data = None
                                     st.session_state.ai_report = None
-                                    st.rerun()
+                                    safe_rerun()
                                     
                     # Fallback for reports in this category that have subcategories not in the predefined list
                     other_reports = [r for r in cat_reports if r['subcategory'] not in subcats]
@@ -829,11 +878,12 @@ with st.sidebar:
                         if cat != "미분류":
                             st.markdown(f"&nbsp;&nbsp;📂 **기타**")
                         for r in other_reports:
-                            if st.button(f"📄 {r['name']} ({r['ticker']}) - {r['timestamp'][:10]}", key=f"btn_{r['key']}", use_container_width=True):
+                            ts_display = str(r['timestamp'])[:10] if r.get('timestamp') else "N/A"
+                            if st.button(f"📄 {r['name']} ({r['ticker']}) - {ts_display}", key=f"btn_{r['key']}", use_container_width=True):
                                 st.session_state.viewing_saved_report = r['original_data']
                                 st.session_state.stock_data = None
                                 st.session_state.ai_report = None
-                                st.rerun()
+                                safe_rerun()
     else:
         st.info("아직 저장된 리포트가 없습니다.")
 
@@ -1020,7 +1070,7 @@ if st.session_state.viewing_saved_report:
                 report_key = f"{report_data['name']} ({report_data['ticker']}) - {report_data['timestamp']}"
                 save_reevaluation_callback(report_key, report_data, reeval_result)
                 st.session_state.reeval_result = None
-                st.rerun()
+                safe_rerun()
 
     else:
         st.warning("이 리포트는 예전 텍스트 형식으로 저장되어 있어 요약 및 비교 기능을 지원하지 않습니다.")
@@ -1054,7 +1104,7 @@ if st.session_state.viewing_saved_report:
             update_report_category(report_key, report_data, new_category, new_subcategory)
             st.session_state.just_saved = True
             st.session_state.viewing_saved_report = None
-            st.rerun()
+            safe_rerun()
 
     st.markdown("<br>", unsafe_allow_html=True)
     
@@ -1062,14 +1112,14 @@ if st.session_state.viewing_saved_report:
     with col_btn1:
         if st.button("닫기 (새로운 검색 하기)", type="primary", use_container_width=True):
             st.session_state.viewing_saved_report = None
-            st.rerun()
+            safe_rerun()
     with col_btn2:
         report_key = f"{report_data['name']} ({report_data['ticker']}) - {report_data['timestamp']}"
         if st.button("🗑️ 이 리포트 삭제하기", use_container_width=True):
             delete_report(report_key, report_data)
             st.session_state.viewing_saved_report = None
             st.session_state.just_deleted = True
-            st.rerun()
+            safe_rerun()
             
     st.stop()
 
