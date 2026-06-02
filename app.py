@@ -27,14 +27,33 @@ def get_actual_prices(ticker, saved_timestamp_str):
     if hist is None or hist.empty:
         return {}
         
+    # Convert index to timezone-naive to avoid comparison errors (e.g. yfinance timezone aware indexes)
+    try:
+        if hist.index.tz is not None:
+            hist.index = hist.index.tz_localize(None)
+    except Exception:
+        pass
+        
     def find_price(target_date):
-        future_data = hist[hist.index >= pd.Timestamp(target_date)]
-        if not future_data.empty:
-            close_series = future_data['Close']
-            if isinstance(close_series, pd.DataFrame):
-                return float(close_series.iloc[0, 0])
-            else:
-                return float(close_series.iloc[0])
+        try:
+            future_data = hist[hist.index >= pd.Timestamp(target_date)]
+            if not future_data.empty:
+                # Robustly find Close column even if columns are MultiIndex or slightly different
+                close_col = 'Close'
+                if isinstance(hist.columns, pd.MultiIndex):
+                    close_col = ('Close', ticker) if ('Close', ticker) in hist.columns else hist.columns[0]
+                
+                if close_col in future_data.columns:
+                    close_series = future_data[close_col]
+                else:
+                    close_series = future_data.iloc[:, 0]
+                    
+                if isinstance(close_series, pd.DataFrame):
+                    return float(close_series.iloc[0, 0])
+                else:
+                    return float(close_series.iloc[0])
+        except Exception:
+            pass
         return None
         
     results = {}
@@ -803,6 +822,18 @@ with st.sidebar:
                                     st.session_state.stock_data = None
                                     st.session_state.ai_report = None
                                     st.rerun()
+                                    
+                    # Fallback for reports in this category that have subcategories not in the predefined list
+                    other_reports = [r for r in cat_reports if r['subcategory'] not in subcats]
+                    if other_reports:
+                        if cat != "미분류":
+                            st.markdown(f"&nbsp;&nbsp;📂 **기타**")
+                        for r in other_reports:
+                            if st.button(f"📄 {r['name']} ({r['ticker']}) - {r['timestamp'][:10]}", key=f"btn_{r['key']}", use_container_width=True):
+                                st.session_state.viewing_saved_report = r['original_data']
+                                st.session_state.stock_data = None
+                                st.session_state.ai_report = None
+                                st.rerun()
     else:
         st.info("아직 저장된 리포트가 없습니다.")
 
